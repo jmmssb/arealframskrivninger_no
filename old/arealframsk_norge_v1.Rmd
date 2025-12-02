@@ -1,0 +1,413 @@
+---
+title: "Artificial Surface Projections for 2050 | Norway"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    theme: cosmo
+    code_folding: hide
+---
+
+```{css, echo=FALSE}
+table {
+  float: left;
+}
+```
+
+Magnus Merkle (SSB) and Kristine Grimsrud (SSB)
+
+Naturregnskapsprosjekt, 4. November 2025
+
+\
+
+# Changelog
+
+Changes since version 0:
+
+-   set up first version
+
+# Abstract and Limitation
+
+In this notebook we make artificial surface projections for Norway until 2050. For the time being the only data inputs are:
+
+-   Grunnkart
+-   Befolkningsframskrivninger fra SSB
+-   Municipality shapefiles
+
+The process is set up to run in four steps. First we estimate a function explaining artificial surface proportions by municipality, using cross-sectional data variation across municipalities. Second, we plug in data projections into the function from step 1, to compute the new artificial surface proportions for 2050. Third, we make a gridded map of urbanisation suitability. Fourth, we allocate new artificial surface cells to the land cover map for 2050, using the outputs of steps 2 and 3. To summarise: Absolute growth in artificial surface by municipality is the outcome of exogenously modelled results fed into an econometrically calibrated model, while allocation of new artificial surface within each municipality follows an exogenously defined land suitability logic.
+
+# 1. Filepaths and packages
+
+```{r, results = 'hide', message = FALSE, warning=FALSE}
+# packages
+library(dplyr)
+library(tidyr)
+library(terra)
+library(ggplot2)
+library(sf)
+# filepath to the wd
+wfp<-file.path("C:","Users","muk",
+               paste0("OneDrive - Statistisk sentralbyr","\U00E5"),
+               "Projects","Naturregnskap","arealframskrivninger","analysis")
+# filepath to Grunnkart
+gfp<-file.path("C:","Users","muk",
+               paste0("OneDrive - Statistisk sentralbyr","\U00E5"),
+               "data","INCA","Norway_files","Grunnkart")
+# filepath to municipalities
+mfp<-file.path("C:","Users","muk",
+               paste0("OneDrive - Statistisk sentralbyr","\U00E5"),
+               "data","Norway")
+# filepath to population data
+pfp<-file.path("C:","Users","muk",
+               paste0("OneDrive - Statistisk sentralbyr","\U00E5"),
+               "data","SSB","Population")
+```
+
+# 2. Get data
+
+In this section we run scripts to import data, aggregate it to the desired resolution, and match it in preparation for the subsequent analysis.
+
+## 2.1 Land cover map
+
+Grunnkart raster file.
+```{r, results = 'hide', message = FALSE, warning=FALSE}
+lcm <- terra::rast(file.path(gfp,"Grunnkart_OT.tif"))
+
+```
+
+## 2.2 Municipality map
+
+Municipality shapefile.
+```{r, results = 'hide', message = FALSE, warning=FALSE}
+mm <- terra::vect(file.path(mfp,"Basisdata_0000_Norge_3035_Kommune_GeoJSON.geojson"))
+mmd<-as.data.frame(mm)
+```
+
+## 2.3 Population tables
+
+Population for 2024 and 2050, by municipality.
+```{r, results = 'hide', message = FALSE, warning=FALSE}
+pd <- read.csv(file.path(pfp,"14288_20251024-085215.csv"),sep=";")
+colnames(pd)<-c("municipality","year","value")
+pd <- pd %>% filter(year %in% c(2024,2050))
+```
+
+## 2.4 Artificial surface density
+
+Now we commpute the share of artificial surface in each municipality. First we need to define what artificial surface is. Below are all categories.
+```{r, message = FALSE, warning=FALSE}
+unique(lcm)
+```
+
+For a start we just group all of the first thirteen categories of Grunnkartet together and call those artificial surface. We ignore variation within them. Then we compute total surface for each municipality and then artificial surface.
+```{r, results = 'hide', message = FALSE, warning=FALSE}
+# lcm with aggregated categories 
+lcma<-lcm
+# basically a change of code
+lcma[lcma %in% c(100,111,112,121,130,131,132,133,134,135,141,142,152)]<-199
+values(lcma)<-as.numeric(values(lcma))
+# now we need to mask grunnkartet to our municipalities
+lcma <- mask(lcma,mm)
+# Then count the number of cells of each kind in each polygon (municipality)
+df <- terra::extract(lcma,mm,fun=table,method="simple")
+# Then count all cells that could potentially be built up (classes 200,300,400,500)
+df['artif']<-df$`199`
+df['available']<-df$`199`+df$`200`+df$`320`+df$`400`+df$`410`+df$`420`+df$`440`+df$`520`
+df['unavailable']<-df$`600`+df$`611`+df$`623`+df$`631`+df$`720`+df$`810`+df$`910`+df$`1100`+df$`1200`+df$`9900`
+# keep only what is needed
+df <- df %>% select(ID,artif,available,unavailable)
+# add municipality names (same order)
+df['munic']<-mmd$kommunenavn
+df['munid']<-mmd$kommunenummer
+df['artifshare']<-df$artif/df$available
+```
+
+## 2.5 Population density
+
+Population density is simply the amount of population divided by available land.
+```{r, results = 'hide', message = FALSE, warning=FALSE}
+# match pd with df
+pd <-pd %>% mutate(munid = substr(municipality, 1, 4))
+unique(pd$munid) %in% df$munid
+# join data
+df <- df %>% left_join(pd %>% filter(year==2024) %>% select(-year) %>% rename(pop = value),by="munid")
+# compute population density
+df['popdens']<-df$pop/(0.01*df$available)
+```
+
+# 3. Analysis Step 1
+
+Now let's look at our data and plot population density against artificial surface share.
+```{r, results = 'hide', message = FALSE, warning=FALSE}
+# make a plot
+ggplot(df,aes(x=popdens,y=artifshare)) + 
+  geom_point() +
+  labs(title="Population and Land Use across Municipalities in Norway",
+       y="Artificial Surface Share",x="Population Density [capita/sqkm]") +
+  theme_bw()
+```
+
+Ok so this looks like a concave positive relationship as expected. Let's define a function that could describe such a relationship. We want it have the following properties:
+
+-   Start in the origin
+-   Be concave
+-   Level off at 1
+
+Here is MM's suggested function: 
+
+$$
+f(x) = \frac{x}{x+a}
+$$ 
+
+where parameter $a$ defines how quickly the function reaches 1. Now let's use a non-linear weighted least squares estimation to get parameter $a$ based on our data. The weight we apply is the overall size of the municipality (larger size gives more weight).
+```{r, message = FALSE, warning=FALSE}
+estresult<-nls(artifshare ~ popdens/(popdens+a),data = df,weights=available+unavailable,start=list(a=1000))
+summary(estresult)
+```
+
+And then plot it.
+```{r, results = 'hide', message = FALSE, warning=FALSE}
+# define the function for ggplot
+a = coef(estresult)
+ourfunction<-function(x){x/(x+a)}
+# make a plot
+ggplot(df,aes(x=popdens,y=artifshare)) + 
+  geom_point() +
+  labs(title="Population and Land Use across Municipalities in Norway",
+       subtitle = paste0("Including best weighted fit for y = x/(x+a)"),
+       y="Artificial Surface Share",x="Population Density [capita/sqkm]") +
+  geom_function(fun=ourfunction,colour="red")+
+  theme_bw()
+# clean up
+rm(estresult)
+```
+
+# 4. Analysis Step 2
+
+Now we use population projections to compute the population density for 2050 in each municipality. And then we use our function to compute the new artificial surface share in 2050 for each municipality
+```{r, results = 'hide', message = FALSE, warning=FALSE}
+# add projection to df
+df <- df %>% 
+  left_join(pd %>% filter(year==2050) %>% select(-c(municipality,year)) %>% rename(pop_2050 = value),by="munid")
+# compute new density
+df['popdens_2050']<-df$pop_2050/(0.01*df$available)
+# and compute the change
+df['popdens_chg']<-df$popdens_2050-df$popdens
+# and also relative change in percent
+df['popdens_chg_rel']<-100*df$popdens_chg/df$popdens
+# then compute the change we would expect using our function
+df['artifshare_chg']<-ourfunction(x=df$popdens_2050)-ourfunction(x=df$popdens)
+# then compute the new artificial surface share
+df['artifshare_2050']<-df$artifshare + df$artifshare_chg
+# and then compute the new artificial surface extent
+df['artif_2050']<-round(df$artifshare_2050*df$available,digits=0)
+# and compute the absolute change
+df['artif_chg'] <- df$artif_2050 - df$artif
+# clean up
+rm(pd)
+```
+
+Let's make a plot showing artificial surface changes by municipality.
+
+```{r, results = 'hide', message = FALSE, warning=FALSE}
+# make a mask to show only available land
+lcmb<-lcma
+lcmb[lcmb %in% c(600,611,623,631,720,810,910,1100,1200,9900)]<-NA
+lcmb[lcmb>1]<-1
+mask_poly <- as.polygons(lcmb, dissolve = TRUE, na.rm = TRUE)
+#  turn our data into a spatial vector object
+dfd<-df %>% rename(kommunenummer = munid)
+mdfd <- merge(mm,dfd,by="kommunenummer")
+# mask it
+mdfd <- crop(mdfd,mask_poly)
+mdfd <- intersect(mdfd,mask_poly)
+# nicer plots with sf objects in ggplot (ggplot doesn't read terra spatial vector objects)
+mdfd_sf <- sf::st_as_sf(mdfd)
+ggplot(mdfd_sf) +
+  geom_sf(aes(fill = artifshare_chg),color=NA) +
+  scale_fill_viridis_c() +
+  theme_minimal() +
+  labs(title = "Predicted change in artificial surface",
+       fill = "Surface proportion")
+# clean up
+rm(mdfd_sf,mdfd,df,mask_poly)
+```
+
+# 5. Analysis Step 3
+
+Now we need to define the eligibility of each cell that is not already artificial to turn into an artificial cell. This could be a sophisticated process taking all kinds of information into account (infrastructure, flood risk, slope, land use plans, etc.). As a first draft, we implement a simple process that only takes current land use into account.
+
+Step i) We compute the proportion of artificial cells in a radius of 5 km. Then normalise the result again to an indicator defined on [0;1]. Then multiply by 100 so we have an index of urbanisation potential based on given density of artificial surface around.
+
+Step ii) We rank land use categories by their urbanisation potential. Note category 310 (sown pastures and fields) does not exist in the current Grunnkart version, so we do not include it here.
+
+Here is MM's suggested ranking:
+
+1.  320 Natural and seminatural grasslands: 0.9
+4.  520 Heathland and sub-alpine shrub: 0.7
+3.  400, 410, 420, 440 alls kinds of forest: 0.5
+5.  200 Annual cropland: 0.3
+
+This is basically an eligibility reduction factor. If a cell is annual cropland, its density-based eligibility gets reduced by 70%. If it is grassland, then it only gets reduced by 10%. Note that this definition is not based on anything else than subjective deliberation, and it should be revisited.
+
+Step iii) Next we compute the distance of each cell to its closest artificial cell. Then we normalise it to an indicator defined on [0;1] and subtract the result from 1, so that 0 is furthest away. So this is again an eligibility reduction factor, which reduces eligibility depending on how far the closest artificial cell is located.
+
+Step iv) We define eligibility as the product of the results from i), ii), and iii).
+
+```{r, results = 'hide', message = FALSE, warning=FALSE}
+## Step i)
+# a) Make a target map. 1 is artificial, 0 is everything else.
+targetr <- lcma
+targetr[targetr==199]<-1
+targetr[targetr>1]<-0
+# b) Make it coarser from 1ha to 4ha (because MM's laptop can't handle the focal function otherwise)
+targetrc <- terra::aggregate(targetr,fact=2,fun=mean)
+# c) Make a round moving window of 5km radius
+w = terra::focalMat(targetrc,5000,type = "circle")
+w[w>0]<-1 # all artificial cells get the same weight of 1
+# d) run the focal function to compute the sum of artificial cells within 5km radius for each cell
+r_sum <- terra::focal(targetrc,w,fun=sum,na.policy = "omit")
+# e) Disaggregate again using interpolation
+r_fine <- terra::disagg(r_sum,fact=2,method="bilinear")
+# f) Then we need to align extents using interpolation
+r_fine_a <- terra::resample(r_fine,lcma,method="bilinear")
+# g) normalise and make an index, gives us the result
+s1r <- 100*r_fine_a/max(values(r_fine_a),na.rm=T)
+# h) clean up
+rm(targetr,targetrc,w,r_sum,r_fine,r_fine_a)
+
+## Step ii)
+# a) Baseline is lcm
+s2r<-lcma
+# b) unavailable
+s2r[s2r %in% c(600,611,623,631,720,810,910,1100,1200,9900)]<-0
+# c) unavailable because already artificial
+s2r[s2r %in% c(199)]<-0
+# d) best
+s2r[s2r == 320]<-0.9
+# e) second best
+s2r[s2r == 520]<-0.7
+# f) third best
+s2r[s2r %in% c(400,410,420,440)]<-0.5
+# g) fourth best
+s2r[s2r == 200]<-0.3
+
+## Step iii)
+# a) Make a target map, 1 is artificial, all else is NA
+targetr <- lcma
+targetr[targetr==199]<-1
+targetr[targetr>1]<-NA
+# b) Compute distance of each cell to the target
+distm <- terra::distance(targetr)
+distm<-terra::mask(distm,lcmb)
+# c) Then our adjustment map
+s3r <- 1-distm/max(values(distm),na.rm=T)
+# d) Clean up
+rm(distm,targetr)
+
+## Step iv)
+# Create our eligibilty raster as the product
+elig_r <- s1r*s2r*s3r
+# And clean up
+rm(s1r,s2r,s3r)
+gc()
+```
+
+Then let's have a look at our resulting map of eligibility.
+```{r, results = 'hide', message = FALSE, warning=FALSE}
+# Here is our raster
+plot(elig_r,main="Eligibility Map")
+# Make a layer with already urban cells
+urb<-lcma
+urb[urb==199]<-1
+urb[urb>1]<-NA
+# And add that
+plot(urb,col="black", add=T,legend=F)
+```
+
+Let's zoom in on the Oslo area to see a bit more.
+
+```{r, results = 'hide', message = FALSE, warning=FALSE}
+oslo_ext <- ext(4300000, 4400000, 4020000, 4120000) 
+plot(crop(elig_r,oslo_ext),main="Eligibility Map Oslofjord")
+plot(crop(urb,oslo_ext),col="black", add=T,legend=F)
+```
+
+# 6. Analysis Step 4
+
+Now as the last step of our analysis we allocate new artificial cells to the land cover map. We do this on the basis of eligibility, defined by step 3. The number of cells to be added in each municipality comes from step 2. We implement the process as a loop across municipalities.
+
+MM to do: Check that all eligibility values are unique, no duplicates.
+
+```{r, results = 'hide', message = FALSE, warning=FALSE}
+gc()
+# first define negative artificial surface change as zero change.
+dfd$artif_chg[dfd$artif_chg<0]<-0
+# we need character municipality identification codes (otherwise rasterize will return levels)
+mmc<-mm
+mmc$kommunenummer <- as.character(mmc$kommunenummer)
+# Extract eligibility values for each municipality
+elig_df <- terra::extract(elig_r, mmc)
+colnames(elig_df)<-c("ID","elig")
+# and then i also want kommunenummer
+elig_df$kommunenummer <- mmc$kommunenummer[elig_df$ID]
+# now compute the thresholds in a loop across municipalities
+dfd['elig_tld']<-NA
+for(i in 1:nrow(dfd)){
+  if(dfd$artif_chg[i]>0){
+    # for debugging
+    # print(dfd$municipality[i])
+    # operation
+    dfd$elig_tld[i]<-sort(elig_df$elig[elig_df$kommunenummer==dfd$kommunenummer[i]],decreasing = T)[dfd$artif_chg[i]]
+  }
+}
+# now set the threholds for those municipalities where there is no urbanisation to 100
+dfd$elig_tld[is.na(dfd$elig_tld)]<-100
+# now merge with our municipality spatial vector
+mdfd <- merge(mm,dfd,by="kommunenummer")
+# then rasterize
+eligtld_r<-terra::rasterize(mdfd,lcma,field="elig_tld")
+# good and now the raster of new artificial cells
+newart_r<-lcma
+newart_r[newart_r>0]<-NA
+# new cells where eligibilty is larger than the minimum threhold
+newart_r[elig_r>=eligtld_r]<-1
+```
+
+Here a plot of the result. A bit difficult to see when looking at the whole country.
+```{r, results = 'hide', message = FALSE, warning=FALSE}
+# Here is our raster
+plot(elig_r,main="Eligibility Map with New Artificial Surface in Red")
+# And add urban layer
+plot(urb,col="black", add=T,legend=F)
+# and add the new ones
+plot(newart_r,colour="red",add=T,legend=F)
+```
+
+Zooming into Oslo we can see a bit more.
+```{r, results = 'hide', message = FALSE, warning=FALSE}
+plot(crop(elig_r,oslo_ext),main="Eligibility Map Oslofjord with New Artificial Surface in Red")
+plot(crop(urb,oslo_ext),col="black", add=T,legend=F)
+plot(crop(newart_r,oslo_ext),col="red", add=T,legend=F)
+```
+
+Most of the predicted growth in artificial surface was possible to allocate, but not perfectly. We need to dig into why this happens. A preliminary guess is that it happens because some municipalities do not have sufficient space for new artificial surface. It could also happen due to duplicate eligibility values. MM to check. Here is the allocation rate.
+```{r, message = FALSE, warning=FALSE}
+sr<-round(100*((sum(dfd$artif_chg)-sum(values(newart_r),na.rm=T))/sum(dfd$artif_chg)),digits=1)
+print(paste0("Predicted artificial surface change was allocated with ",sr," % error margin."))
+```
+
+# 7. Result Plots and Tables
+
+To be added, depending on what we want to zoom into. Cities? Specific area cases? Land cover transformation tables?
+
+```{r, results = 'hide', message = FALSE, warning=FALSE}
+writeRaster(newart_r,file.path(wfp,"results","newartif.tif"),overwrite=T)
+write.csv(dfd,file.path(wfp,"results","calculationdf.csv"))
+```
+
+
+# 8. Ideas for Extensions
+
+Many :-)

@@ -48,10 +48,9 @@ library(terra)
 library(ggplot2)
 library(sf)
 library(writexl)
+library(here)
 # filepath to the wd
-wfp<-file.path("C:","Users","muk",
-               paste0("OneDrive - Statistisk sentralbyr","\U00E5"),
-               "Projects","Naturregnskap","arealframskrivninger","analysis")
+wfp<-file.path(here::here())
 # filepath to Grunnkart
 gfp<-file.path("C:","Users","muk",
                paste0("OneDrive - Statistisk sentralbyr","\U00E5"),

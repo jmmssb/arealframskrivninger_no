@@ -882,7 +882,7 @@ print(paste0("Predicted artificial surface change was allocated with ",sr," % er
 To be added, depending on what we want to zoom into. Cities? Specific area cases? Land cover transformation tables? For the time being, we just export some raster maps and calculation tables.
 ```{r, results = 'hide', message = FALSE, warning=FALSE}
 writeRaster(newart_r,file.path(wfp,"results","newartif.tif"),overwrite=T)
-writeRaster(elig_rf,file.path(wfp,"results","eligtif.tif"),overwrite=T)
+writeRaster(round(elig_rf,digits=3),file.path(wfp,"results","eligtif.tif"),overwrite=T)
 writeRaster(eligtld_r,file.path(wfp,"results","eligtldtif.tif"),overwrite=T)
 write_xlsx(dfd,file.path(wfp,"results","calculationdf.xlsx"))
 ```

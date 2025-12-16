@@ -2570,7 +2570,7 @@ print(paste0(&quot;Predicted artificial surface change was allocated with &quot;
 area cases? Land cover transformation tables? For the time being, we
 just export some raster maps and calculation tables.</p>
 <pre class="r"><code>writeRaster(newart_r,file.path(wfp,&quot;results&quot;,&quot;newartif.tif&quot;),overwrite=T)
-writeRaster(elig_rf,file.path(wfp,&quot;results&quot;,&quot;eligtif.tif&quot;),overwrite=T)
+writeRaster(round(elig_rf,digits=3),file.path(wfp,&quot;results&quot;,&quot;eligtif.tif&quot;),overwrite=T)
 writeRaster(eligtld_r,file.path(wfp,&quot;results&quot;,&quot;eligtldtif.tif&quot;),overwrite=T)
 write_xlsx(dfd,file.path(wfp,&quot;results&quot;,&quot;calculationdf.xlsx&quot;))</code></pre>
 </div>
